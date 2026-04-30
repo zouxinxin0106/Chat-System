@@ -1,0 +1,115 @@
+syntax = "proto3";
+
+package chat.v1;
+
+option java_package = "com.chat.proto";
+option java_multiple_files = true;
+
+// --- Message Content (oneof) ---
+
+message TextContent {
+  string text = 1;
+}
+
+message ImageContent {
+  string url = 1;
+  int32 width = 2;
+  int32 height = 3;
+  string thumbnail_url = 4;
+}
+
+message VoiceContent {
+  string url = 1;
+  int32 duration_seconds = 2;
+}
+
+message AttendanceContent {
+  string event_name = 1;
+  bool is_check_in = 2;
+}
+
+message ReadReceiptContent {
+  string conversation_id = 1;
+  string last_read_message_id = 2;
+}
+
+message MessageContent {
+  oneof content {
+    TextContent text = 1;
+    ImageContent image = 2;
+    VoiceContent voice = 3;
+    AttendanceContent attendance = 4;
+    ReadReceiptContent read_receipt = 5;
+  }
+}
+
+// --- Enums ---
+
+enum MessageType {
+  MESSAGE_TYPE_UNSPECIFIED = 0;
+  MESSAGE_TYPE_TEXT = 1;
+  MESSAGE_TYPE_IMAGE = 2;
+  MESSAGE_TYPE_VOICE = 3;
+  MESSAGE_TYPE_ATTENDANCE = 4;
+  MESSAGE_TYPE_READ_RECEIPT = 5;
+}
+
+enum DeliveryStatus {
+  DELIVERY_STATUS_UNSPECIFIED = 0;
+  DELIVERY_STATUS_SENT = 1;
+  DELIVERY_STATUS_DELIVERED = 2;
+  DELIVERY_STATUS_READ = 3;
+}
+
+// --- Core Message ---
+
+message ChatMessage {
+  string message_id = 1;
+  string conversation_id = 2;
+  string sender_id = 3;
+  MessageType type = 4;
+  MessageContent content = 5;
+  int64 sequence_id = 6;
+  int64 create_at = 7;
+  DeliveryStatus status = 8;
+  string correlation_id = 9;
+}
+
+// --- gRPC Services ---
+
+service ChatServiceGrpc {
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+  rpc GetMessages(GetMessagesRequest) returns (GetMessagesResponse);
+  rpc PushToDevice(PushRequest) returns (PushResponse);
+}
+
+message SendMessageRequest {
+  ChatMessage message = 1;
+}
+
+message SendMessageResponse {
+  string message_id = 1;
+  DeliveryStatus status = 2;
+  int64 sequence_id = 3;
+}
+
+message GetMessagesRequest {
+  string conversation_id = 1;
+  string from_message_id = 2;
+  int32 limit = 3;
+}
+
+message GetMessagesResponse {
+  repeated ChatMessage messages = 1;
+}
+
+message PushRequest {
+  string connection_id = 1;
+  string gateway_instance_id = 2;
+  ChatMessage message = 3;
+}
+
+message PushResponse {
+  bool success = 1;
+  string error = 2;
+}

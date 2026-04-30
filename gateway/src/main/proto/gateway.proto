@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package gateway;
+
+option java_package = "com.chat.proto";
+option java_multiple_files = true;
+
+message UpsertSessionRequest {
+  string user_id = 1;
+  string connection_id = 2;
+  string gateway_instance_id = 3;
+  int64 connected_at = 4;
+}
+
+message UpsertSessionResponse {
+  bool success = 1;
+}
+
+message RemoveSessionRequest {
+  string connection_id = 1;
+}
+
+message RemoveSessionResponse {
+  bool success = 1;
+}
+
+service GatewaySessionGrpc {
+  rpc UpsertSession(UpsertSessionRequest) returns (UpsertSessionResponse);
+  rpc RemoveSession(RemoveSessionRequest) returns (RemoveSessionResponse);
+}

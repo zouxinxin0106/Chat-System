@@ -12,6 +12,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
+import java.util.List;
+
 @Service
 public final class ReadReceiptHandler implements MessageHandler {
     public static final MessageType MESSAGE_TYPE = MessageType.MESSAGE_TYPE_READ_RECEIPT;
@@ -59,5 +62,14 @@ public final class ReadReceiptHandler implements MessageHandler {
             log.error("[{}] ReadReceiptHandler: Failed to process read receipt", correlationId, e);
             return DeliveryResult.failure("Failed to process read receipt: " + e.getMessage());
         }
+    }
+
+    @Override
+    public List<DeliveryResult> handleBatch(List<ProcessedMessage> messages) {
+        List<DeliveryResult> results = new ArrayList<>();
+        for (ProcessedMessage message : messages) {
+            results.add(handle(message));
+        }
+        return results;
     }
 }

@@ -11,6 +11,10 @@ public interface SessionRegistry {
 
     void removeSession(String connectionId);
 
+    void updatePresence(String userId, String status);
+
+    String getPresence(String userId);
+
     List<ConnectionInfo> getUserSessions(String userId);
 
     Optional<ConnectionInfo> getSession(String connectionId);

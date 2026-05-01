@@ -72,6 +72,16 @@ public final class InMemoryMessageRepository implements MessageRepository {
         return Optional.ofNullable(messageById.get(messageId));
     }
 
+    @Override
+    public List<ChatMessage> getMessagesInRange(String conversationId, long fromSequenceId, long toSequenceId) {
+        List<ChatMessage> messages = conversationMessages.getOrDefault(conversationId, new ArrayList<>());
+
+        return messages.stream()
+                .filter(m -> m.getSequenceId() >= fromSequenceId && m.getSequenceId() <= toSequenceId)
+                .sorted(Comparator.comparingLong(ChatMessage::getSequenceId))
+                .collect(Collectors.toList());
+    }
+
     public long getNextSequenceId(String conversationId) {
         return sequenceCounters.computeIfAbsent(conversationId, k -> new AtomicLong(0))
                 .incrementAndGet();

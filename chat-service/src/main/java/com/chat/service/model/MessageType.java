@@ -6,7 +6,9 @@ public enum MessageType {
     MESSAGE_TYPE_IMAGE(2),
     MESSAGE_TYPE_VOICE(3),
     MESSAGE_TYPE_ATTENDANCE(4),
-    MESSAGE_TYPE_READ_RECEIPT(5);
+    MESSAGE_TYPE_READ_RECEIPT(5),
+    MESSAGE_TYPE_PRESENCE(6),
+    MESSAGE_TYPE_PATCH(7);
 
     private final int value;
 

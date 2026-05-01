@@ -91,4 +91,66 @@ public class DevGatewayPushClient implements GatewayPushClient {
                         .map(CompletableFuture::join)
                         .toList());
     }
+
+    @Override
+    public CompletableFuture<List<PushResponse>> pushBatch(Map<String, List<String>> gatewayToConnectionIds, ChatMessage message) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                List<Map<String, Object>> entries = gatewayToConnectionIds.entrySet().stream()
+                        .map(e -> Map.of(
+                                "connection_ids", e.getValue(),
+                                "gateway_instance_id", e.getKey()
+                        ))
+                        .toList();
+
+                Map<String, Object> batchPayload = Map.of(
+                        "entries", entries,
+                        "message", Map.of(
+                                "message_id", message.getMessageId(),
+                                "conversation_id", message.getConversationId(),
+                                "sender_id", message.getSenderId(),
+                                "type", message.getType().name(),
+                                "sequence_id", message.getSequenceId(),
+                                "correlation_id", message.getCorrelationId() != null ? message.getCorrelationId() : ""
+                        )
+                );
+
+                String json = objectMapper.writeValueAsString(batchPayload);
+
+                HttpRequest request = HttpRequest.newBuilder()
+                        .uri(URI.create("http://" + gatewayHost + ":" + gatewayPort + "/push/batch"))
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(json))
+                        .build();
+
+                HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+                log.info("GatewayPushClient: Batch pushed message {} to {} gateways, response: {}",
+                        message.getMessageId(), entries.size(), response.statusCode());
+
+                if (response.statusCode() >= 200 && response.statusCode() < 300) {
+                    return parseBatchResponse(response.body());
+                } else {
+                    return gatewayToConnectionIds.values().stream()
+                            .flatMap(List::stream)
+                            .map(id -> new PushResponse(false, "HTTP " + response.statusCode()))
+                            .toList();
+                }
+            } catch (Exception e) {
+                log.error("Failed to batch push to gateway: {}", e.getMessage(), e);
+                return gatewayToConnectionIds.values().stream()
+                        .flatMap(List::stream)
+                        .map(id -> new PushResponse(false, e.getMessage()))
+                        .toList();
+            }
+        });
+    }
+
+    private List<PushResponse> parseBatchResponse(String responseBody) throws Exception {
+        Map<String, Object> response = objectMapper.readValue(responseBody, Map.class);
+        List<Map<String, Object>> results = (List<Map<String, Object>>) response.get("results");
+        return results.stream()
+                .map(r -> new PushResponse((Boolean) r.get("success"), null))
+                .toList();
+    }
 }

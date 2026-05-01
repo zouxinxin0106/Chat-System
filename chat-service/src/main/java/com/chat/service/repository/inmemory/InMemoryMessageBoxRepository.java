@@ -34,21 +34,31 @@ public final class InMemoryMessageBoxRepository implements MessageBoxRepository 
     }
 
     @Override
+    public void saveEntriesBatch(List<String> userIds, String messageId) {
+        if (userIds == null || messageId == null) {
+            throw new IllegalArgumentException("userIds and messageId cannot be null");
+        }
+
+        for (String userId : userIds) {
+            userMessages.computeIfAbsent(userId, k -> ConcurrentHashMap.newKeySet())
+                    .add(messageId);
+        }
+
+        log.debug("Saved message {} for {} users", messageId, userIds.size());
+    }
+
+    @Override
     public List<String> getUnread(String userId, String conversationId) {
         Set<String> messages = userMessages.get(userId);
         if (messages == null) {
             return Collections.emptyList();
         }
 
-        // In a real implementation, we would filter by conversationId
-        // For now, return all messages for the user
         return messages.stream().collect(Collectors.toList());
     }
 
     @Override
     public void markAsRead(String userId, String messageId) {
         log.info("Marking message {} as read for user {}", messageId, userId);
-        // In a real implementation, this would update the read status
-        // For now, we just log the action
     }
 }

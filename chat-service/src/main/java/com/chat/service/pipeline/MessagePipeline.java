@@ -10,6 +10,7 @@ import com.chat.service.pipeline.stage.ValidateStage;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -44,5 +45,26 @@ public final class MessagePipeline {
             "sequence_id", current.getSequenceId()
         ));
         return current;
+    }
+
+    public List<ProcessedMessage> processBatch(List<ChatMessage> inputMessages) throws Exception {
+        LOG.info("Starting batch pipeline", Map.of("count", inputMessages.size()));
+
+        List<ProcessedMessage> results = new ArrayList<>();
+        for (ChatMessage inputMessage : inputMessages) {
+            ProcessedMessage current = ProcessedMessage.builder()
+                    .message(inputMessage)
+                    .correlationId(inputMessage.getCorrelationId() != null ?
+                        inputMessage.getCorrelationId() : "unknown")
+                    .build();
+
+            for (MessageProcessor processor : processors) {
+                current = processor.process(current);
+            }
+            results.add(current);
+        }
+
+        LOG.info("Batch pipeline completed", Map.of("count", results.size()));
+        return results;
     }
 }

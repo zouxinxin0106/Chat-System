@@ -18,7 +18,12 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 @Service
 public final class DeliveryOrchestrator {
@@ -35,6 +40,7 @@ public final class DeliveryOrchestrator {
     private final ReadFanOutStrategy readFanOutStrategy;
 
     private static final int READ_FAN_OUT_THRESHOLD = 100;
+    private static final int BATCH_SIZE = 100;
 
     @Autowired
     public DeliveryOrchestrator(
@@ -65,35 +71,30 @@ public final class DeliveryOrchestrator {
         log.info("[{}] DeliveryOrchestrator: Starting delivery orchestration", correlationId);
 
         try {
-            // Step 1: Get handler and process message
             var handlerOpt = handlerRegistry.getHandler(message.getType());
             if (handlerOpt.isEmpty()) {
                 log.warn("[{}] DeliveryOrchestrator: No handler found for message type: {}", correlationId, message.getType());
                 return DeliveryResult.failure("No handler for message type: " + message.getType());
             }
 
-            // Step 2: Handle via specific handler (persist, etc.)
             var handlerResult = handlerOpt.get().handle(processedMessage);
             if (!handlerResult.success()) {
                 log.warn("[{}] DeliveryOrchestrator: Handler failed: {}", correlationId, handlerResult.errorMessage());
                 return handlerResult;
             }
 
-            // Step 3: Get recipients from conversation
             List<String> participantIds = conversationStore.getParticipantIds(message.getConversationId());
             if (participantIds.isEmpty()) {
-                log.warn("[{}] DeliveryOrchestrator: No participants found for conversation: {}", 
+                log.warn("[{}] DeliveryOrchestrator: No participants found for conversation: {}",
                         correlationId, message.getConversationId());
             }
 
-            // Remove sender from recipients
             participantIds = participantIds.stream()
                     .filter(id -> !id.equals(message.getSenderId()))
                     .toList();
 
             log.info("[{}] DeliveryOrchestrator: Processing {} recipients", correlationId, participantIds.size());
 
-            // Step 4: Fan-out to recipients based on group size
             if (!participantIds.isEmpty()) {
                 FanOutStrategy strategy = participantIds.size() >= READ_FAN_OUT_THRESHOLD
                         ? readFanOutStrategy
@@ -101,14 +102,12 @@ public final class DeliveryOrchestrator {
                 strategy.fanOut(message, participantIds);
             }
 
-            // Step 5: Query sessions and push to online devices
             for (String recipientId : participantIds) {
                 List<ConnectionInfo> sessions = sessionRegistry.getUserSessions(recipientId);
-                
+
                 if (sessions.isEmpty()) {
-                    log.info("[{}] DeliveryOrchestrator: User {} is offline, queuing message", 
+                    log.info("[{}] DeliveryOrchestrator: User {} is offline, queuing message",
                             correlationId, recipientId);
-                    // Queue for offline delivery
                     offlineQueue.enqueue(new com.chat.service.queue.OfflineMessage(
                             message.getMessageId(),
                             recipientId,
@@ -117,7 +116,6 @@ public final class DeliveryOrchestrator {
                             Instant.now().plusSeconds(60)
                     ));
                 } else {
-                    // Push to each session
                     for (ConnectionInfo session : sessions) {
                         gatewayPushClient.pushToConnection(
                                 session.connectionId(),
@@ -125,16 +123,15 @@ public final class DeliveryOrchestrator {
                                 message
                         ).thenAccept(response -> {
                             if (response.isSuccess()) {
-                                log.info("[{}] DeliveryOrchestrator: Pushed to device for user {}", 
+                                log.info("[{}] DeliveryOrchestrator: Pushed to device for user {}",
                                         correlationId, recipientId);
-                                // Publish delivered event
                                 eventBus.publish(new MessageDeliveredEvent(
                                         message.getMessageId(),
                                         recipientId,
                                         Instant.now().toEpochMilli()
                                 ));
                             } else {
-                                log.warn("[{}] DeliveryOrchestrator: Push failed for user {}: {}", 
+                                log.warn("[{}] DeliveryOrchestrator: Push failed for user {}: {}",
                                         correlationId, recipientId, response.getError());
                             }
                         });
@@ -149,5 +146,103 @@ public final class DeliveryOrchestrator {
             log.error("[{}] DeliveryOrchestrator: Orchestration failed", correlationId, e);
             return DeliveryResult.failure("Delivery orchestration failed: " + e.getMessage());
         }
+    }
+
+    public List<DeliveryResult> orchestrateBatch(List<ProcessedMessage> processedMessages) {
+        log.info("DeliveryOrchestrator: Starting batch orchestration for {} messages", processedMessages.size());
+
+        if (processedMessages.isEmpty()) {
+            return List.of();
+        }
+
+        List<DeliveryResult> results = new ArrayList<>();
+
+        try {
+            List<DeliveryResult> handlerResults = handlerRegistry.handleBatch(processedMessages);
+            results.addAll(handlerResults);
+
+            Map<String, List<String>> messageToRecipients = new HashMap<>();
+            for (ProcessedMessage pm : processedMessages) {
+                ChatMessage msg = pm.getMessage();
+                List<String> participants = new ArrayList<>(conversationStore.getParticipantIds(msg.getConversationId()));
+                participants.remove(msg.getSenderId());
+                messageToRecipients.put(msg.getMessageId(), participants);
+            }
+
+            for (ProcessedMessage pm : processedMessages) {
+                ChatMessage msg = pm.getMessage();
+                List<String> recipients = messageToRecipients.get(msg.getMessageId());
+                if (recipients != null && !recipients.isEmpty()) {
+                    FanOutStrategy strategy = recipients.size() >= READ_FAN_OUT_THRESHOLD
+                            ? readFanOutStrategy
+                            : writeFanOutStrategy;
+                    strategy.fanOut(msg, recipients);
+                }
+            }
+
+            Map<String, List<ConnectionInfo>> sessionsByGateway = new HashMap<>();
+            for (ProcessedMessage pm : processedMessages) {
+                ChatMessage msg = pm.getMessage();
+                List<String> recipients = messageToRecipients.get(msg.getMessageId());
+                if (recipients == null) continue;
+
+                for (String recipientId : recipients) {
+                    List<ConnectionInfo> sessions = sessionRegistry.getUserSessions(recipientId);
+                    for (ConnectionInfo session : sessions) {
+                        sessionsByGateway
+                                .computeIfAbsent(session.gatewayInstanceId(), k -> new ArrayList<>())
+                                .add(session);
+                    }
+                }
+            }
+
+            for (Map.Entry<String, List<ConnectionInfo>> entry : sessionsByGateway.entrySet()) {
+                String gatewayId = entry.getKey();
+                List<ConnectionInfo> sessions = entry.getValue();
+
+                List<List<String>> batches = partition(
+                        sessions.stream().map(ConnectionInfo::connectionId).toList(),
+                        BATCH_SIZE
+                );
+
+                for (List<String> batch : batches) {
+                    ChatMessage message = processedMessages.get(0).getMessage();
+                    gatewayPushClient.pushBatch(Map.of(gatewayId, batch), message);
+                }
+            }
+
+            for (ProcessedMessage pm : processedMessages) {
+                ChatMessage msg = pm.getMessage();
+                List<String> recipients = messageToRecipients.get(msg.getMessageId());
+                if (recipients == null) continue;
+
+                for (String recipientId : recipients) {
+                    List<ConnectionInfo> sessions = sessionRegistry.getUserSessions(recipientId);
+                    if (sessions.isEmpty()) {
+                        offlineQueue.enqueue(new com.chat.service.queue.OfflineMessage(
+                                msg.getMessageId(),
+                                recipientId,
+                                null,
+                                0,
+                                Instant.now().plusSeconds(60)
+                        ));
+                    }
+                }
+            }
+
+            log.info("DeliveryOrchestrator: Batch orchestration completed for {} messages", processedMessages.size());
+        } catch (Exception e) {
+            log.error("DeliveryOrchestrator: Batch orchestration failed", e);
+        }
+
+        return results;
+    }
+
+    private <T> List<List<T>> partition(List<T> list, int size) {
+        List<List<T>> partitions = new ArrayList<>();
+        for (int i = 0; i < list.size(); i += size) {
+            partitions.add(list.subList(i, Math.min(i + size, list.size())));
+        }
+        return partitions;
     }
 }

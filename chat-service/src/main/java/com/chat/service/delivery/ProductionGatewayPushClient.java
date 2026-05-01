@@ -7,6 +7,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 @Service
@@ -30,6 +31,17 @@ public class ProductionGatewayPushClient implements GatewayPushClient {
         log.warn("ProductionGatewayPushClient: pushToConnections called - not implemented");
         return CompletableFuture.completedFuture(
                 connectionIds.stream().map(id -> new PushResponse(false, "Not implemented")).toList()
+        );
+    }
+
+    @Override
+    public CompletableFuture<List<PushResponse>> pushBatch(Map<String, List<String>> gatewayToConnectionIds, ChatMessage message) {
+        log.warn("ProductionGatewayPushClient: pushBatch called - not implemented");
+        return CompletableFuture.completedFuture(
+                gatewayToConnectionIds.values().stream()
+                        .flatMap(List::stream)
+                        .map(id -> new PushResponse(false, "Not implemented"))
+                        .toList()
         );
     }
 }

@@ -23,6 +23,7 @@ public class InMemorySessionRegistry implements SessionRegistry {
     private static final long CLEANUP_INTERVAL_SECONDS = 10;
 
     private final Map<String, Map<String, ConnectionInfo>> sessionsByUser = new ConcurrentHashMap<>();
+    private final Map<String, String> userPresence = new ConcurrentHashMap<>();
     private final long ttlSeconds;
     private final ScheduledExecutorService scheduler;
     private volatile boolean running = false;
@@ -71,6 +72,17 @@ public class InMemorySessionRegistry implements SessionRegistry {
             }
         }
         logger.debug("Session {} not found for removal", connectionId);
+    }
+
+    @Override
+    public void updatePresence(String userId, String status) {
+        userPresence.put(userId, status);
+        logger.debug("Updated presence for user {} to {}", userId, status);
+    }
+
+    @Override
+    public String getPresence(String userId) {
+        return userPresence.getOrDefault(userId, "OFFLINE");
     }
 
     @Override

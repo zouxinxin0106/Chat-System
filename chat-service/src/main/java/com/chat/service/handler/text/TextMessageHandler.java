@@ -11,6 +11,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
+import java.util.List;
+
 @Service
 public final class TextMessageHandler implements MessageHandler {
     public static final MessageType MESSAGE_TYPE = MessageType.MESSAGE_TYPE_TEXT;
@@ -49,5 +52,14 @@ public final class TextMessageHandler implements MessageHandler {
             log.error("[{}] TextMessageHandler: Failed to process message", correlationId, e);
             return DeliveryResult.failure("Failed to process message: " + e.getMessage());
         }
+    }
+
+    @Override
+    public List<DeliveryResult> handleBatch(List<ProcessedMessage> messages) {
+        List<DeliveryResult> results = new ArrayList<>();
+        for (ProcessedMessage message : messages) {
+            results.add(handle(message));
+        }
+        return results;
     }
 }

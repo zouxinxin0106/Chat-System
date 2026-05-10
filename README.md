@@ -1,4 +1,4 @@
-# Chat System — Production Design
+# Chat System
 
 ## Architecture
 
@@ -29,7 +29,7 @@
 │  Pipeline: Decode → Validate → Authorize → Enrich                          │
 │                                                                             │
 │  Delivery Orchestrator:                                                     │
-│    1. Persist (DynamoDB messages + Message_box)                            │
+│    1. Persist (MongoDB messages + Message_box)                              │
 │    2. Return SENT to sender                                               │
 │    3. Query Session Registry → online device list                         │
 │    4. gRPC push (500ms timeout, 1-2 retries) → DELIVERED                    │
@@ -39,7 +39,7 @@
 │    Small group (≤ threshold): write fan-out to Message_box                 │
 │    Large group (> threshold): read fan-out + conversation sharding         │
 │                                                                             │
-│  Storage: DynamoDB (messages, message_box) | MySQL (conversation, parts)   │
+│  Storage: MongoDB (messages, message_box) | MySQL (conversation, parts)     │
 └─────────────────────────────────────────────────────────────────────────────┘
                                   │
                                   ▼ Kafka (async)
@@ -61,7 +61,7 @@
    Authorize (conversation membership + role) → Enrich (sequence_id, timestamp)
 
 4. Delivery Orchestrator
-   a. Persist to DynamoDB (messages table + Message_box with fan-out decision)
+   a. Persist to MongoDB (messages collection + Message_box with fan-out decision)
       — Must succeed; failure returns error to sender
    b. Return SENT to sender (single checkmark)
    c. Query Session Registry → recipient online device list
@@ -84,13 +84,11 @@
 
 Gateway holds per-pod `ChannelMap (userId → List<Channel>)` for direct channel write on push. ChatService has zero session state — all routing reads from Redis Session Registry.
 
-**Trade-off:** Gateway pods are stateful. On scale-in, wait for heartbeat timeout (~3-4 min) before terminating pods to avoid premature session expiry. Acceptable: brief window where a disconnected user's push goes to Kafka (harmless).
+Gateway maintains in-memory connection state, enabling low-latency direct message push.
 
 ### 2. Consistent Hash at L7, Not L4
 
-L4 load balancing (TCP) cannot inspect JWT/userId — it routes randomly. L7 (Envoy, NGINX Ingress) routes by `hash(userId)` → same user sticks to same pod. Reduces cross-pod traffic for single-device users.
-
-**Pod failover:** Pod goes unhealthy → Ingress marks it down → client reconnects to different pod → re-authenticates → UPSERT new connectionId to Redis with new gatewayInstanceId → ChatService routes to new pod → client backfills missed messages via last_message_id.
+L4 load balancing (TCP) cannot inspect JWT/userId — it routes randomly. L7 (Envoy, NGINX Ingress) routes by `hash(userId)` → same user sticks to same pod. This reduces cross-node traffic and improves cache locality in gateway nodes.
 
 ### 3. Hybrid Fan-out: Write vs Read
 
@@ -102,20 +100,24 @@ L4 load balancing (TCP) cannot inspect JWT/userId — it routes randomly. L7 (En
 
 **Our choice:** Configurable threshold. Small groups: low read latency is worth the write cost. Large groups: avoids write amplification for N=1000+ members.
 
-### 4. DynamoDB for Messages, MySQL for Metadata
+### 4. MongoDB for Messages, MySQL for Metadata
 
-DynamoDB: high write throughput for append-only messages, limited query patterns.
+MongoDB: high write throughput for append-only messages, flexible schema for mixed message types (text/image/voice), compound shard key for write distribution.
 MySQL: rich relational queries, ACID transactions for participant management.
 
-**Our choice:** Performance isolation — DynamoDB handles what it's best at (message append), MySQL handles what it does best (participant joins/leaves, role management).
+**Our choice:** Performance isolation — MongoDB handles what it's best at (message append), MySQL handles what it does best (participant joins/leaves, role management).
 
-**Hot partition mitigation:**
-- `messages` table (PK=conversation_id): high-traffic viral convs use GSI on `sender_id#create_at_month`. No salt-based PK sharding (DynamoDB doesn't support it).
-- `message_box` (PK=user_id): hot read users → DynamoDB DAX (in-memory cache) or read replicas. Write fan-out naturally distributes writes.
+**Shard Key Design:**
+- `messages` collection: `{ conversation_id, sequence_id }` - sharded by conversation_id for write distribution, ordered reads
+- `message_box` collection: `{ user_id, bucket_id }` - bucket_id = message_id % N to avoid hot users
+
+**Hot Partition Solutions:**
+- Super large groups (1000+ members): Read Fan-out + parallel scatter-gather queries
+- Hot users: compound shard key `{ user_id, bucket_id }` to distribute writes
 
 ### 5. 3-State ACK: Sent / Delivered / Read
 
-- **SENT:** Persisted to DynamoDB. Sender sees ✓
+- **SENT:** Persisted to MongoDB. Sender sees ✓
 - **DELIVERED:** gRPC push confirmed to recipient's device. Recipient sees ✓✓
 - **READ:** Recipient opens / auto-read on pull. ChatService: (1) updates is_read + read_count, (2) syncs READ state to recipient's other devices, (3) notifies sender → sender sees "read" / "N read"
 
@@ -123,17 +125,17 @@ MySQL: rich relational queries, ACID transactions for participant management.
 
 ### 6. Per-Conversation Sequence ID
 
-Monotonically increasing per conversation. Gap detected → client sends GAP_DETECTION → ChatService returns missing range from DynamoDB.
+Monotonically increasing per conversation. Gap detected → client sends GAP_DETECTION → ChatService returns missing range from MongoDB.
 
-**Why:** Solves distributed ordering without global coordination. Sequence ID is not globally unique — only unique per conversation — keeps it lightweight and naturally sortable by DynamoDB clustering key.
+**Why:** Solves distributed ordering without global coordination. Sequence ID is not globally unique — only unique per conversation — keeps it lightweight and naturally sortable by MongoDB clustering key.
 
 ### 7. At-Least-Once + Idempotent Storage
 
 - Snowflake message_id (64-bit, time-ordered) is the deduplication key
-- DynamoDB conditional put: if message_id exists → skip silently
+- MongoDB upsert with message_id: if message_id exists → skip silently
 - Client can safely retry on timeout; server ignores duplicates
 
-**Trade-off:** True exactly-once requires distributed transactions across DynamoDB + Kafka + gRPC. Significantly more complex. At-least-once + idempotent retry is sufficient for chat.
+**Trade-off:** True exactly-once requires distributed transactions across MongoDB + Kafka + gRPC. Significantly more complex. At-least-once + idempotent retry is sufficient for chat.
 
 ### 8. WebSocket Ping/Pong Heartbeat
 
@@ -158,7 +160,7 @@ Binary serialization, strongly typed, schema-evolution safe, compact.
 ## Scalability
 
 ### ChatService: Stateless Horizontal Scaling
-Add/remove pods with zero coordination. All state lives in Redis/DynamoDB/MySQL.
+Add/remove pods with zero coordination. All state lives in Redis/MongoDB/MySQL.
 
 ### Gateway: Stateful but Gracefully Distributed
 Per-pod ChannelMap is the only stateful part. Scale strategy:
@@ -166,11 +168,12 @@ Per-pod ChannelMap is the only stateful part. Scale strategy:
 - Graceful drain on scale-in: wait for heartbeat timeout before terminating pod
 - During drain: brief window where a disconnected user's push goes to Kafka (harmless)
 
-### DynamoDB: Partition-Level Scaling
-- conversation_id as PK distributes writes across partitions
-- GSI for cross-conversation queries (scatter-gather)
+### MongoDB: Shard-Based Scaling
+- conversation_id as shard key distributes writes across shards
+- Compound shard key { conversation_id, sequence_id } for ordered reads
+- Read fan-out uses parallel scatter-gather across shards
 - DAX for hot read users (influencers, support agents)
-- On-demand or provisioned capacity mode
+- Sharded cluster or replica set configuration
 
 ### Redis Session Registry
 - Keys: `session:{userId}` → hash of connection entries
@@ -190,10 +193,10 @@ Per-pod ChannelMap is the only stateful part. Scale strategy:
 Per-conversation sequence ID. Gaps → backfill.
 
 ### Idempotency
-Snowflake message_id + DynamoDB conditional put. Safe retry.
+Snowflake message_id + MongoDB upsert. Safe retry.
 
 ### Delivery Guarantee
-At-least-once. DynamoDB persist is source of truth — if persist fails, nothing else happens (error returned to sender, no delivery triggered).
+At-least-once. MongoDB persist is source of truth — if persist fails, nothing else happens (error returned to sender, no delivery triggered).
 
 ### Offline Delivery
 Kafka retry queue. Consumer tracks retry count with exponential backoff. After N attempts → Notification Service RPC as final fallback.
@@ -223,9 +226,9 @@ ChatService: message_processed_total (by type + status),
             delivery_GRPC_success_total, delivery_GRPC_failure_total,
             kafka_publish_latency_seconds
 
-DynamoDB:  consumed_capacity_units (read/write), throttling_events_total,
+MongoDB:  consumed_write_units, consumed_read_units, throttling_events_total,
             write_latency_p99_seconds (per message type),
-            partition_variance_ratio (hot partition risk)
+            shard_variance_ratio (hot shard risk)
 
 Redis:     command_latency_seconds (p50/p95/p99), keyspace_hits_per_second,
             evictions_total
@@ -240,7 +243,7 @@ Kafka:     consumer_lag (by topic+partition), produce_latency_seconds (p99)
 
 Internal stage targets:
 - Decode+Validate+Authorize+Enrich: p99 < 5ms
-- DynamoDB persist: p99 < 100ms
+- MongoDB persist: p99 < 100ms
 - gRPC push + client ACK roundtrip: p99 < 300ms
 
 ### SLOs
@@ -248,7 +251,7 @@ Internal stage targets:
 ```
 E2E delivery latency p99 < 1s          SLO: 99.9%
 Gateway push success rate > 99.5%       SLO: 99.5%
-DynamoDB write latency p99 < 200ms      SLO: 99.9%
+MongoDB write latency p99 < 200ms      SLO: 99.9%
 Kafka consumer lag < 10,000            SLO: 99.9%
 ```
 
@@ -262,7 +265,7 @@ chat_pipeline (root)
   ├── validate
   ├── authorize
   ├── enrich
-  ├── dynamodb_persist
+  ├── mongodb_persist
   ├── redis_session_query
   ├── gRPC_push
   └── kafka_publish
@@ -270,7 +273,7 @@ chat_pipeline (root)
 
 Sampling: head-based 5% success + tail-based 100% errors + latency > 1s. Result: ~1-2% trace volume, full coverage of what matters.
 
-Auto-instrumentation: gRPC interceptors, AWS SDK (DynamoDB), Kafka client.
+Auto-instrumentation: gRPC interceptors, MongoDB driver, Kafka client.
 Manual spans: critical pipeline stages (decode/enrich/delivery decision).
 
 ### Logging
@@ -278,7 +281,7 @@ Manual spans: critical pipeline stages (decode/enrich/delivery decision).
 Structured JSON (JSON lines), correlation_id in every entry.
 
 ```
-ERROR: always — push failures, DynamoDB throttling, exceptions
+ERROR: always — push failures, MongoDB throttling, exceptions
 WARN:  always — retry triggered, heartbeat timeout, gRPC deadline
 INFO:  connection lifecycle, message persisted, delivery confirmed
        (0.1%-1% sample — full logging infeasible at throughput)
@@ -293,19 +296,19 @@ Trade-off: 0.1%-1% INFO sampling balances debuggability with storage/performance
 Critical (page immediately):
   - E2E latency p99 > 2s for 5 min
   - kafka_consumer_lag > 50,000 for 5 min
-  - DynamoDB throttling > 50/min
+  - MongoDB throttling > 50/min
   - gRPC push success rate < 99% for 5 min
 
 Warning (notify, no page):
   - kafka_consumer_lag > 10,000 for 10 min
-  - DynamoDB consumed capacity > 80%
-  - partition_variance_ratio > 3x (hot partition risk)
+  - MongoDB consumed capacity > 80%
+  - shard_variance_ratio > 3x (hot shard risk)
   - connection_closes spike (sudden drop vs gradual)
   - Redis latency p99 > 50ms
   - heartbeat_timeout_total > 20/min
 ```
 
-Alert on symptoms (user-visible latency, error rates), not causes. `connection_closes` spike distinguishes突发掉线 (sudden) from gradual scaling events.
+Alert on symptoms (user-visible latency, error rates), not causes. `connection_closes` spike distinguishes sudden disconnections from gradual scaling events.
 
 ---
 
@@ -319,7 +322,7 @@ Alert on symptoms (user-visible latency, error rates), not causes. `connection_c
 | Message Queue | Apache Kafka |
 | Cache / Session | Redis (Redisson) |
 | Relational DB | MySQL (Hibernate) |
-| Message Storage | AWS DynamoDB |
+| Message Storage | MongoDB (sharded cluster) |
 | Serialization | Protocol Buffers v3 |
 | ID Generation | Snowflake |
 | Observability | Prometheus + OpenTelemetry + Jaeger/Tempo |

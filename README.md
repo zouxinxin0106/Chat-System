@@ -117,8 +117,8 @@ MySQL: rich relational queries, ACID transactions for participant management.
 
 ### 5. 3-State ACK: Sent / Delivered / Read
 
-- **SENT:** Persisted to MongoDB. Sender sees ✓
-- **DELIVERED:** gRPC push confirmed to recipient's device. Recipient sees ✓✓
+- **SENT:** Persisted to MongoDB. Sender sees 
+- **DELIVERED:** gRPC push confirmed to recipient's device. Recipient sees 
 - **READ:** Recipient opens / auto-read on pull. ChatService: (1) updates is_read + read_count, (2) syncs READ state to recipient's other devices, (3) notifies sender → sender sees "read" / "N read"
 
 **Large group read receipts (v1):** read_count only. Extension (README): bitmap using immutable `sequence_id` from ConversationParticipant (stable on join/leave, no remapping).
@@ -143,13 +143,8 @@ WebSocket native Ping/Pong (2 bytes) + 45-60s app-level interval + grace period 
 
 **Trade-off:** 30s heartbeat catches offline faster but adds ~90% more traffic for active users. 45-60s + grace period keeps detection under 4 minutes while cutting heartbeat overhead by ~90%.
 
-### 9. Session Registry: TTL + Grace Period (No Immediate Delete)
 
-On disconnect, Gateway removes channel from in-memory map immediately but does NOT delete the Redis entry — Redis TTL = 60s handles expiration naturally.
-
-**Why:** Immediate deletion creates a race: Gateway deletes → ChatService queries → user appears offline → Kafka offline queue triggered → but user had only a brief network blip. TTL avoids this without added implementation complexity.
-
-### 10. Protobuf over JSON
+### 9. Protobuf over JSON
 
 Binary serialization, strongly typed, schema-evolution safe, compact.
 
@@ -166,13 +161,12 @@ Add/remove pods with zero coordination. All state lives in Redis/MongoDB/MySQL.
 Per-pod ChannelMap is the only stateful part. Scale strategy:
 - Distribute pods across availability zones
 - Graceful drain on scale-in: wait for heartbeat timeout before terminating pod
-- During drain: brief window where a disconnected user's push goes to Kafka (harmless)
 
 ### MongoDB: Shard-Based Scaling
 - conversation_id as shard key distributes writes across shards
 - Compound shard key { conversation_id, sequence_id } for ordered reads
 - Read fan-out uses parallel scatter-gather across shards
-- DAX for hot read users (influencers, support agents)
+- Redis cache for hot users (influencers, support agents)
 - Sharded cluster or replica set configuration
 
 ### Redis Session Registry
@@ -230,7 +224,7 @@ MongoDB:  consumed_write_units, consumed_read_units, throttling_events_total,
             write_latency_p99_seconds (per message type),
             shard_variance_ratio (hot shard risk)
 
-Redis:     command_latency_seconds (p50/p95/p99), keyspace_hits_per_second,
+Redis:     command_latency_seconds (p50/p95/p99), 
             evictions_total
 
 Kafka:     consumer_lag (by topic+partition), produce_latency_seconds (p99)
